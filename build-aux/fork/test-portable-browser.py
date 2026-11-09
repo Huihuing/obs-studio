@@ -99,7 +99,7 @@ def loopback(stack, reports, extension_page):
     return server
 
 
-def prepare_profile(config, base):
+def prepare_profile(config, base, extension):
     def write(relative, value):
         path = config / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +136,8 @@ def prepare_profile(config, base):
                     "settings": {"items": items, "id_counter": len(items)}})
     write("basic/scenes/Smoke.json", json.dumps({"name": "Smoke", "version": 2, "sources": sources,
           "scene_order": [{"name": "Smoke"}], "current_scene": "Smoke", "current_program_scene": "Smoke"}))
+    # Seed the same local preference saved by the OBS Tools menu. Forward slashes avoid INI backslash escapes.
+    write("plugin_config/obs-browser/extensions.ini", f'[General]\ndirectory="{extension.resolve().as_posix()}"\n')
     write("plugin_config/obs-browser/javascript-approvals.ini", "[General]\n" + "".join(approvals))
 
 
@@ -150,15 +152,15 @@ def verify(archive, fixture):
         config = root / "config/obs-studio"
         if not exe.is_file() or config.exists() or not (root / "portable_mode.txt").is_file():
             raise RuntimeError("Expected a clean, marked portable OBS archive")
-        extension = root / "probe extension"
+        extension = root / "probe 확장"
         shutil.copytree(fixture / "extension", extension)
         page = (fixture / "site/extension-smoke.html").read_text(encoding="utf-8")
         page = page.replace("</html>", EXTENSION_REPORT + "</html>")
         first, other = (loopback(stack, reports, page) for _ in range(2))
         first.redirect_to = f"http://127.0.0.1:{other.server_port}/redirect"
-        prepare_profile(config, f"http://127.0.0.1:{first.server_port}")
+        prepare_profile(config, f"http://127.0.0.1:{first.server_port}", extension)
         proc = subprocess.Popen([str(exe), "--portable", "--multi", "--disable-updater",
-                                 f"--obs-browser-extension={extension}", "--disable-missing-files-check", "--profile", "Smoke", "--collection", "Smoke"],
+                                 "--disable-missing-files-check", "--profile", "Smoke", "--collection", "Smoke"],
                                 cwd=exe.parent)
         pending = {("approved", 0), ("approved", 1), *((name, 0) for name in CASES if name != "approved")}
         pending.add(("extension", 0))

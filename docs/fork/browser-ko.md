@@ -1,6 +1,10 @@
 # Windows에서 개조 OBS 브라우저 소스 사용하기
 
-## 포터블 빌드
+## Windows 포터블 실행
+
+GitHub에서 해당 본체 PR의 **Checks → Fork portable build and browser checks** 실행을 열고 `portable`과 `windows-browser-smoke`의 결과를 확인한다. **Artifacts** 아래 **obs-fork-windows-x64**를 내려받고 안쪽의 `obs-fork-windows-x64-*.zip`도 새 폴더에 푼다. 그 안의 `bin\64bit\obs64.exe`를 실행한다.
+
+## 직접 빌드
 
 현재 개발 중인 PR 브랜치를 PowerShell에서 내려받는다. 병합 후에는 `--branch setup/use-huihuing-obs-browser`를 생략할 수 있다. 이 소스의 Windows 빌드 프리셋은 Visual Studio 2026의 C++ 데스크톱 개발 도구, Windows SDK 10.0.26100.0, Visual Studio 18 2026 생성기를 지원하는 CMake를 사용한다.
 
@@ -30,14 +34,18 @@ document.body.append(badge);
 
 ## 압축 해제한 Chrome 확장 시험
 
-이 빌드는 시작할 때 `manifest.json`이 들어 있는 확장 디렉터리 하나를 CEF에 전달한다. 확장은 매니페스트가 지정한 주소에 접근할 수 있고 브라우저 프로필 단위로 적용된다. OBS를 완전히 종료한 뒤, 포터블 ZIP을 푼 폴더에서 실행한다.
+1. OBS의 **도구 → 브라우저 확장 프로그램… → 폴더 선택…**을 열고 `manifest.json`이 들어 있는 확장 폴더 하나를 고른다.
+2. OBS를 완전히 종료하고 다시 실행한다. 확장은 매니페스트가 허용한 주소의 브라우저 소스와 독에 적용된다.
+3. 끄려면 같은 메뉴에서 **확장 프로그램 해제**를 선택한 뒤 재시작한다.
+
+저장한 폴더 대신 이번 실행에만 다른 확장을 쓰려면 포터블 ZIP을 푼 폴더에서 아래처럼 실행한다.
 
 ```powershell
 cd .\bin\64bit
 .\obs64.exe "--obs-browser-extension=C:\OBS Extensions\my-extension"
 ```
 
-공백과 한글이 들어간 절대 경로를 사용할 수 있다. 경로에 쉼표가 포함되면 로딩을 거부한다. 옵션 없이 다시 시작하면 확장이 꺼진다. 이 단계에서 확인할 수 있는 범위는 확장의 콘텐츠 스크립트, MV3 서비스 워커, 네트워크 규칙 등 각 기능의 호환성이다. 압축된 CRX 설치, 웹 스토어 설치, 툴바 팝업은 지원 범위 밖이다.
+공백과 한글이 들어간 절대 경로를 사용할 수 있다. 경로에 쉼표가 포함되면 로딩을 거부한다. 옵션 없이 다시 시작하면 메뉴에 저장한 설정이 적용된다. 이번 실행에서 모든 확장을 끄려면 `--disable-extensions`를 사용한다. 이 단계에서 확인할 수 있는 범위는 확장의 콘텐츠 스크립트, MV3 서비스 워커, 네트워크 규칙 등 각 기능의 호환성이다. 압축된 CRX 설치, 웹 스토어 설치, 툴바 팝업은 지원 범위 밖이다.
 
 직접 시험하려면 소스 저장소의 [확장 테스트 예제](../../plugins/obs-browser)에서 `tests/extension-smoke/README.md`를 연다. 로컬 테스트 페이지에 세 결과가 각각 표시된다. 자동 빌드가 활성화된 경우 본체 Actions의 **Fork portable build and browser checks**에서 Linux CEF 테스트 로그와 Windows 빌드 결과를 확인할 수 있다.
 
