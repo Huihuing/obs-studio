@@ -22,14 +22,14 @@ PAGE = """<!doctype html><meta charset=utf-8><title>OBS JavaScript probe</title>
 <script>
 addEventListener("load", () => setTimeout(async () => {
   const name = location.pathname.slice(1);
-  const phase = Number(sessionStorage.phase || 0);
+  const phase = Number(location.hash === "#reloaded");
   const report = { name, phase, main: Number(document.documentElement.dataset.runs || 0),
     child: Number(document.getElementById("child").contentDocument.documentElement.dataset.runs || 0),
     css: getComputedStyle(document.documentElement).getPropertyValue("--ci-obs-css").trim(),
     browser: typeof window.obsstudio?.pluginVersion === "string" };
   const reply = await fetch("/report", { method: "POST", body: JSON.stringify(report) });
   if (reply.ok && name === "approved" && phase === 0) {
-    sessionStorage.phase = "1";
+    history.replaceState(null, "", "#reloaded");
     location.reload();
   }
 }, 1800));
@@ -39,11 +39,11 @@ addEventListener("load", () => setTimeout(async () => {
 # Observe the existing extension fixture's title. This page code uses no OBS-injected JavaScript.
 EXTENSION_REPORT = r"""<script>
 const observer = new MutationObserver(() => {
-  const value = /^Content script: (yes|no) \| Worker: (yes|no) \| Network rule: (yes|no)$/.exec(document.title);
+  const value = /^Content script: (yes|no) \| Worker: (yes|no) \| Network rule: (yes|no) \| Second: (yes|no)$/.exec(document.title);
   if (!value) return;
   observer.disconnect();
   fetch("/report", { method: "POST", body: JSON.stringify({ name: "extension", phase: 0,
-    content: value[1], worker: value[2], dnr: value[3], browser: typeof window.obsstudio?.pluginVersion === "string" }) });
+    content: value[1], worker: value[2], dnr: value[3], second: value[4], browser: typeof window.obsstudio?.pluginVersion === "string" }) });
 });
 observer.observe(document.querySelector("title"), { childList: true, subtree: true, characterData: true });
 </script>"""
@@ -99,7 +99,7 @@ def loopback(stack, reports, extension_page):
     return server
 
 
-def prepare_profile(config, base, extension):
+def prepare_profile(config, base):
     def write(relative, value):
         path = config / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,9 +136,58 @@ def prepare_profile(config, base, extension):
                     "settings": {"items": items, "id_counter": len(items)}})
     write("basic/scenes/Smoke.json", json.dumps({"name": "Smoke", "version": 2, "sources": sources,
           "scene_order": [{"name": "Smoke"}], "current_scene": "Smoke", "current_program_scene": "Smoke"}))
-    # Seed the same local preference saved by the OBS Tools menu. Forward slashes avoid INI backslash escapes.
-    write("plugin_config/obs-browser/extensions.ini", f'[General]\ndirectory="{extension.resolve().as_posix()}"\n')
     write("plugin_config/obs-browser/javascript-approvals.ini", "[General]\n" + "".join(approvals))
+
+
+def check_launch(exe, config, first, other, reports, enabled_a, enabled_b):
+    proc = subprocess.Popen([str(exe), "--portable", "--multi", "--disable-updater",
+                             "--disable-missing-files-check", "--profile", "Smoke", "--collection", "Smoke"],
+                            cwd=exe.parent)
+    pending = {("approved", 0), ("approved", 1), *((name, 0) for name in CASES if name != "approved")}
+    pending.add(("extension", 0))
+    deadline = time.monotonic() + 120
+    try:
+        while pending:
+            if proc.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError(f"OBS exit={proc.poll()}. Missing DOM reports: {sorted(pending)}")
+            try:
+                port, report = reports.get(timeout=0.5)
+            except Empty:
+                continue
+            name, phase = report["name"], report["phase"]
+            print(f"{name} load {phase}: {report}", flush=True)
+            if name == "extension":
+                # Confirm the network effect independently with the requests the loopback server saw.
+                expected_a = "yes" if enabled_a else "no"
+                expected_b = "yes" if enabled_b else "no"
+                if (("extension", phase) not in pending or port != first.server_port or report["browser"] is not True
+                        or (report["content"], report["worker"], report["dnr"]) != (expected_a,) * 3
+                        or report["second"] != expected_b
+                        or "network=control" not in first.network_requests
+                        or ("network=block" in first.network_requests) == enabled_a):
+                    raise RuntimeError(f"Extension check failed: {report}, server saw {first.network_requests}")
+                pending.remove(("extension", phase))
+                continue
+            expected_port = other.server_port if name == "redirect" else first.server_port
+            if (port != expected_port or (name, phase) not in pending
+                    or report["main"] != int(name == "approved") or report["child"] != 0
+                    or report["css"] != "applied" or report["browser"] is not True):
+                raise RuntimeError(f"Unexpected browser-source result: {report}, port={port}")
+            pending.remove((name, phase))
+        # A normal exit lets CEF flush the profile and prevents OBS showing crash recovery on the next launch.
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                        f"if (!([Diagnostics.Process]::GetProcessById({proc.pid}).CloseMainWindow())) {{ exit 1 }}"],
+                       check=True, timeout=20)
+        if proc.wait(timeout=45) != 0:
+            raise RuntimeError(f"OBS exited with {proc.returncode}")
+    except BaseException:
+        for log in sorted((config / "logs").glob("*.txt"))[-1:]:
+            print(log.read_text(encoding="utf-8-sig", errors="replace")[-18000:], flush=True)
+        raise
+    finally:
+        if proc.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], timeout=20, check=True)
+            proc.wait(timeout=10)
 
 
 def verify(archive, fixture):
@@ -152,53 +201,25 @@ def verify(archive, fixture):
         config = root / "config/obs-studio"
         if not exe.is_file() or config.exists() or not (root / "portable_mode.txt").is_file():
             raise RuntimeError("Expected a clean, marked portable OBS archive")
-        extension = root / "probe 확장"
-        shutil.copytree(fixture / "extension", extension)
+        extensions = [root / "probe 확장 A", root / "probe 확장 B"]
+        for folder, dest in zip(("extension", "extension-b"), extensions):
+            shutil.copytree(fixture / folder, dest)
         page = (fixture / "site/extension-smoke.html").read_text(encoding="utf-8")
         page = page.replace("</html>", EXTENSION_REPORT + "</html>")
         first, other = (loopback(stack, reports, page) for _ in range(2))
         first.redirect_to = f"http://127.0.0.1:{other.server_port}/redirect"
-        prepare_profile(config, f"http://127.0.0.1:{first.server_port}", extension)
-        proc = subprocess.Popen([str(exe), "--portable", "--multi", "--disable-updater",
-                                 "--disable-missing-files-check", "--profile", "Smoke", "--collection", "Smoke"],
-                                cwd=exe.parent)
-        pending = {("approved", 0), ("approved", 1), *((name, 0) for name in CASES if name != "approved")}
-        pending.add(("extension", 0))
-        deadline = time.monotonic() + 120
-        try:
-            while pending:
-                if proc.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError(f"OBS exit={proc.poll()}. Missing DOM reports: {sorted(pending)}")
-                try:
-                    port, report = reports.get(timeout=0.5)
-                except Empty:
-                    continue
-                name, phase = report["name"], report["phase"]
-                print(f"{name} load {phase}: {report}", flush=True)
-                if name == "extension":
-                    # A blocked fetch is meaningful only when the control reached our server and the blocked URL did not.
-                    if (("extension", phase) not in pending or port != first.server_port or report["browser"] is not True
-                            or (report["content"], report["worker"], report["dnr"]) != ("yes", "yes", "yes")
-                            or "network=control" not in first.network_requests
-                            or "network=block" in first.network_requests):
-                        raise RuntimeError(f"Extension check failed: {report}, server saw {first.network_requests}")
-                    print(f"Content script: {report['content']}; service worker: {report['worker']}; DNR: yes", flush=True)
-                    pending.remove(("extension", phase))
-                    continue
-                expected_port = other.server_port if name == "redirect" else first.server_port
-                if (port != expected_port or (name, phase) not in pending
-                        or report["main"] != int(name == "approved") or report["child"] != 0
-                        or report["css"] != "applied" or report["browser"] is not True):
-                    raise RuntimeError(f"Unexpected browser-source result: {report}, port={port}")
-                pending.remove((name, phase))
-        except BaseException:
-            for log in sorted((config / "logs").glob("*.txt"))[-1:]:
-                print(log.read_text(encoding="utf-8-sig", errors="replace")[-18000:], flush=True)
-            raise
-        finally:
-            if proc.poll() is None:
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], timeout=20, check=True)
-                proc.wait(timeout=10)
+        prepare_profile(config, f"http://127.0.0.1:{first.server_port}")
+
+        # Match the Tools dialog's QSettings QStringLists. A quoted path also covers Korean and spaces.
+        registered = [f'"{path.resolve().as_posix()}"' for path in extensions]
+        settings = config / "plugin_config/obs-browser/extensions.ini"
+        for enabled_a, enabled_b in ((True, True), (True, False), (False, True), (False, False)):
+            checked = [path for path, enabled in zip(registered, (enabled_a, enabled_b)) if enabled]
+            settings.write_text("[General]\n" + "directories=" + ", ".join(registered) + "\n"
+                                + "enabledDirectories=" + (", ".join(checked) or "@Invalid()") + "\n", encoding="utf-8")
+            print(f"Starting OBS with A={enabled_a}, B={enabled_b}", flush=True)
+            first.network_requests.clear()
+            check_launch(exe, config, first, other, reports, enabled_a, enabled_b)
 
 
 if __name__ == "__main__":
