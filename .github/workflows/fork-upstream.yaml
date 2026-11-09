@@ -1,0 +1,20 @@
+name: Check upstream OBS release
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 6 * * *'
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  propose-update:
+    if: github.repository == 'Huihuing/obs-studio'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: master
+          fetch-depth: 0
+      - run: bash build-aux/fork/prepare-upstream.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
